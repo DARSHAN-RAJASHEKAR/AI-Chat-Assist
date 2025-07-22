@@ -6,8 +6,10 @@ exports.handler = async (event, context) => {
   const { message, context: userContext } = JSON.parse(event.body);
 
   try {
-    // First, check if this is a booking request
+    // Check if this is a booking request first
     const bookingIntent = await checkBookingIntent(message);
+    
+    console.log('Booking intent:', bookingIntent);
 
     if (bookingIntent.isBooking) {
       return await handleBooking(bookingIntent, message);
@@ -57,6 +59,7 @@ User Question: ${message}`,
       }),
     };
   } catch (error) {
+    console.error('Error in chat handler:', error);
     return {
       statusCode: 500,
       body: JSON.stringify({ error: "Failed to get response" }),
@@ -65,59 +68,82 @@ User Question: ${message}`,
 };
 
 async function checkBookingIntent(message) {
+  // Improved booking detection
   const bookingKeywords = [
-    "book",
-    "schedule",
-    "appointment",
-    "call",
-    "meeting",
-    "chat",
+    "book", "schedule", "appointment", "call", "meeting", 
+    "chat", "talk", "discuss", "consultation", "session"
   ];
-  const timeKeywords = ["today", "tomorrow", "pm", "am", "at", "on"];
-
+  
   const lowerMessage = message.toLowerCase();
+  
+  // Check for booking keywords
   const hasBookingKeyword = bookingKeywords.some((keyword) =>
     lowerMessage.includes(keyword)
   );
-  const hasTimeKeyword = timeKeywords.some((keyword) =>
-    lowerMessage.includes(keyword)
-  );
 
-  if (hasBookingKeyword && hasTimeKeyword) {
-    // Extract time using AI
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: `Extract the date and time from this booking request. Return ONLY a JSON object with date (YYYY-MM-DD) and time (HH:MM) in 24-hour format. If today, use today's date. If no specific date mentioned, assume today.
+  console.log('Message:', message);
+  console.log('Has booking keyword:', hasBookingKeyword);
+
+  if (hasBookingKeyword) {
+    // If it's a simple booking request without specific time, handle it
+    if (!lowerMessage.includes('today') && 
+        !lowerMessage.includes('tomorrow') && 
+        !lowerMessage.includes('pm') && 
+        !lowerMessage.includes('am') &&
+        !lowerMessage.includes('at ') &&
+        !lowerMessage.includes('on ')) {
+      
+      return {
+        isBooking: true,
+        isGeneral: true // General booking request without specific time
+      };
+    }
+
+    // Try to extract specific time if mentioned
+    try {
+      const response = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            contents: [
+              {
+                parts: [
+                  {
+                    text: `Extract the date and time from this booking request. Return ONLY a JSON object with date (YYYY-MM-DD) and time (HH:MM) in 24-hour format. If today, use today's date. If no specific date mentioned, assume today. If no specific time, return null for time.
+
+Current date: ${new Date().toISOString().split('T')[0]}
 
 Message: "${message}"
 
-Example response: {"date": "2024-07-18", "time": "18:30"}`,
-                },
-              ],
-            },
-          ],
-        }),
-      }
-    );
+Example response: {"date": "2024-07-18", "time": "18:30"} or {"date": "2024-07-18", "time": null}`,
+                  },
+                ],
+              },
+            ],
+          },
+        }
+      );
 
-    const data = await response.json();
-    const timeInfo = JSON.parse(data.candidates[0].content.parts[0].text);
+      const data = await response.json();
+      const timeInfo = JSON.parse(data.candidates[0].content.parts[0].text);
 
-    return {
-      isBooking: true,
-      date: timeInfo.date,
-      time: timeInfo.time,
-    };
+      return {
+        isBooking: true,
+        date: timeInfo.date,
+        time: timeInfo.time,
+        isGeneral: !timeInfo.time
+      };
+    } catch (error) {
+      console.error('Error extracting time:', error);
+      return {
+        isBooking: true,
+        isGeneral: true
+      };
+    }
   }
 
   return { isBooking: false };
@@ -125,6 +151,34 @@ Example response: {"date": "2024-07-18", "time": "18:30"}`,
 
 async function handleBooking(bookingIntent, originalMessage) {
   try {
+    // Handle general booking requests (without specific time)
+    if (bookingIntent.isGeneral) {
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          reply: `I'd be happy to help you schedule a call with Darshan! 
+
+Here are a few options:
+1. Visit his calendar directly: https://cal.com/darshan-rajashekar/quick-call
+2. Let me know a preferred time (e.g., "tomorrow at 3 PM" or "Friday morning")
+
+What works best for you?`,
+        }),
+      };
+    }
+
+    // Check if Cal.com API is configured
+    if (!process.env.CAL_API_KEY || !process.env.CAL_USERNAME) {
+      return {
+        statusCode: 200,
+        body: JSON.stringify({
+          reply: `I'd love to help you schedule a call! Please visit Darshan's calendar to book a time that works for you: [Add your Cal.com booking link here]
+
+You can also reach out directly via email or LinkedIn for scheduling.`,
+        }),
+      };
+    }
+
     // Get available slots from Cal.com
     const availableSlots = await getAvailableSlots(bookingIntent.date);
 
@@ -143,7 +197,9 @@ async function handleBooking(bookingIntent, originalMessage) {
           } is not available. Here are some available times: ${availableSlots
             .slice(0, 3)
             .map((slot) => new Date(slot.time).toLocaleTimeString())
-            .join(", ")}`,
+            .join(", ")}
+
+Or you can view all available slots on his calendar: [Add your Cal.com link]`,
         }),
       };
     }
@@ -162,10 +218,13 @@ async function handleBooking(bookingIntent, originalMessage) {
       }),
     };
   } catch (error) {
+    console.error('Booking error:', error);
     return {
       statusCode: 200,
       body: JSON.stringify({
-        reply: `Sorry, I couldn't book that time slot. Please try again or visit my calendar directly at [your-cal-link]`,
+        reply: `I'd be happy to help you schedule a call! Please visit Darshan's calendar directly to book a time: [Add your Cal.com booking link here]
+
+Alternatively, you can reach out via email or LinkedIn to schedule.`,
       }),
     };
   }
