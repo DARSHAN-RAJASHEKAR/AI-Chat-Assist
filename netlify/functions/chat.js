@@ -113,11 +113,9 @@ async function checkBookingIntent(message) {
   console.log("Has booking keyword:", hasBookingKeyword);
   console.log("Has time keyword:", hasTimeKeyword);
 
-  // If it's a previous booking conversation and user mentions a time
-  if (
-    hasTimeKeyword &&
-    (lowerMessage.includes("friday") || lowerMessage.includes("morning"))
-  ) {
+  // **FIX:** This now correctly identifies a follow-up by checking for any time-related keyword.
+  if (hasTimeKeyword && !hasBookingKeyword) {
+    // If a time is mentioned without a booking keyword, assume it's a booking continuation.
     return {
       isBooking: true,
       isGeneral: false,
@@ -126,7 +124,7 @@ async function checkBookingIntent(message) {
   }
 
   if (hasBookingKeyword) {
-    // Check if it's a general booking request without specific time
+    // Check if it's a general booking request without a specific time
     if (!hasTimeKeyword) {
       return {
         isBooking: true,
@@ -134,53 +132,13 @@ async function checkBookingIntent(message) {
       };
     }
 
-    // Try to extract specific time if mentioned
-    try {
-      const currentDate = new Date().toISOString().split("T")[0];
-      const promptText = `Extract the date and time from this booking request. Return ONLY a JSON object with date (YYYY-MM-DD) and time (HH:MM) in 24-hour format. If today, use today's date. If no specific date mentioned, assume today. If no specific time, return null for time.
-
-Current date: ${currentDate}
-
-Message: "${message}"
-
-Example response: {"date": "2024-07-18", "time": "18:30"} or {"date": "2024-07-18", "time": null}`;
-
-      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
-
-      const response = await fetch(geminiUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          contents: [
-            {
-              parts: [
-                {
-                  text: promptText,
-                },
-              ],
-            },
-          ],
-        }),
-      });
-
-      const data = await response.json();
-      const timeInfo = JSON.parse(data.candidates[0].content.parts[0].text);
-
-      return {
-        isBooking: true,
-        date: timeInfo.date,
-        time: timeInfo.time,
-        isGeneral: !timeInfo.time,
-      };
-    } catch (error) {
-      console.error("Error extracting time:", error);
-      return {
-        isBooking: true,
-        isGeneral: true,
-      };
-    }
+    // If booking and time keywords are present, proceed to extract the details.
+    // This path is taken for messages like "book a call for tomorrow at 3 PM"
+    return {
+      isBooking: true,
+      isGeneral: false,
+      continueBooking: false, // Not a continuation, but a new request with details
+    };
   }
 
   return { isBooking: false };
@@ -210,6 +168,54 @@ What works best for you?`;
       };
     }
 
+    // **REVISED LOGIC:** Centralize the date/time extraction.
+    // This block will now handle initial requests with time AND follow-up messages.
+    let timeInfo;
+    try {
+      const currentDate = new Date().toISOString().split("T")[0];
+      const promptText = `Extract the date and time from this booking request. Return ONLY a JSON object with date (YYYY-MM-DD) and time (HH:MM) in 24-hour format. If today, use today's date. If no specific date mentioned, assume today. If no specific time, return null for time.
+
+Current date: ${currentDate}
+
+Message: "${originalMessage}"
+
+Example response: {"date": "2024-07-18", "time": "18:30"} or {"date": "2024-07-18", "time": null}`;
+
+      const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
+
+      const response = await fetch(geminiUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                {
+                  text: promptText,
+                },
+              ],
+            },
+          ],
+        }),
+      });
+
+      const data = await response.json();
+      timeInfo = JSON.parse(data.candidates[0].content.parts[0].text);
+
+      // If time extraction fails or returns null time, treat as a general booking query
+      if (!timeInfo || !timeInfo.time) {
+        bookingIntent.isGeneral = true;
+        return handleBooking(bookingIntent, originalMessage);
+      }
+    } catch (error) {
+      console.error("Error extracting time:", error);
+      // Fallback to general booking if time extraction fails.
+      bookingIntent.isGeneral = true;
+      return handleBooking(bookingIntent, originalMessage);
+    }
+
     // Check if Cal.com API is configured
     if (!process.env.CAL_API_KEY || !process.env.CAL_USERNAME) {
       const calendarUrl = process.env.CAL_USERNAME
@@ -229,11 +235,10 @@ You can also reach out directly via email or LinkedIn for scheduling.`;
     }
 
     // Get available slots from Cal.com
-    const availableSlots = await getAvailableSlots(bookingIntent.date);
+    const availableSlots = await getAvailableSlots(timeInfo.date);
 
     // Check if requested time is available
-    const requestedDateTime =
-      bookingIntent.date + "T" + bookingIntent.time + ":00";
+    const requestedDateTime = timeInfo.date + "T" + timeInfo.time + ":00";
     const isAvailable = availableSlots.some(
       (slot) => slot.time === requestedDateTime
     );
@@ -247,7 +252,7 @@ You can also reach out directly via email or LinkedIn for scheduling.`;
       const calendarLink = process.env.CAL_USERNAME
         ? `https://cal.com/${process.env.CAL_USERNAME}`
         : "his calendar";
-      const unavailableMessage = `Sorry, ${bookingIntent.time} on ${bookingIntent.date} is not available. Here are some available times: ${availableTimesText}
+      const unavailableMessage = `Sorry, ${timeInfo.time} on ${timeInfo.date} is not available. Here are some available times: ${availableTimesText}
 
 Or you can view all available slots on ${calendarLink}`;
 
