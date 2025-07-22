@@ -192,7 +192,7 @@ async function handleBooking(bookingIntent, originalMessage) {
     if (bookingIntent.isGeneral) {
       const calendarUrl = process.env.CAL_USERNAME
         ? `https://cal.com/${process.env.CAL_USERNAME}`
-        : "https://cal.com/darshan-rajashekar";
+        : "your calendar";
 
       const replyMessage = `I'd be happy to help you schedule a call with Darshan! 
 
@@ -214,9 +214,9 @@ What works best for you?`;
     if (!process.env.CAL_API_KEY || !process.env.CAL_USERNAME) {
       const calendarUrl = process.env.CAL_USERNAME
         ? `https://cal.com/${process.env.CAL_USERNAME}`
-        : "https://cal.com/darshan-rajashekar";
+        : "his calendar";
 
-      const fallbackMessage = `I'd love to help you schedule a call! Please visit Darshan's calendar to book a time that works for you: ${calendarUrl}
+      const fallbackMessage = `I'd love to help you schedule a call! Please visit ${calendarUrl} to book a time that works for you.
 
 You can also reach out directly via email or LinkedIn for scheduling.`;
 
@@ -244,15 +244,12 @@ You can also reach out directly via email or LinkedIn for scheduling.`;
         .map((slot) => new Date(slot.time).toLocaleTimeString())
         .join(", ");
 
-      const unavailableMessage = `Sorry, ${bookingIntent.time} on ${
-        bookingIntent.date
-      } is not available. Here are some available times: ${availableTimesText}
+      const calendarLink = process.env.CAL_USERNAME
+        ? `https://cal.com/${process.env.CAL_USERNAME}`
+        : "his calendar";
+      const unavailableMessage = `Sorry, ${bookingIntent.time} on ${bookingIntent.date} is not available. Here are some available times: ${availableTimesText}
 
-Or you can view all available slots on his calendar: ${
-        process.env.CAL_USERNAME
-          ? `https://cal.com/${process.env.CAL_USERNAME}`
-          : "https://cal.com/darshan-rajashekar"
-      }`;
+Or you can view all available slots on ${calendarLink}`;
 
       return {
         statusCode: 200,
@@ -278,11 +275,10 @@ Or you can view all available slots on his calendar: ${
     };
   } catch (error) {
     console.error("Booking error:", error);
-    const errorMessage = `I'd be happy to help you schedule a call! Please visit Darshan's calendar directly to book a time: ${
-      process.env.CAL_USERNAME
-        ? `https://cal.com/${process.env.CAL_USERNAME}`
-        : "https://cal.com/darshan-rajashekar"
-    }
+    const calendarLink = process.env.CAL_USERNAME
+      ? `https://cal.com/${process.env.CAL_USERNAME}`
+      : "his calendar";
+    const errorMessage = `I'd be happy to help you schedule a call! Please visit ${calendarLink} to book a time.
 
 Alternatively, you can reach out via email or LinkedIn to schedule.`;
 
