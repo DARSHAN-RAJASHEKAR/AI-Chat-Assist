@@ -80,26 +80,54 @@ async function checkBookingIntent(message) {
     "session",
   ];
 
+  const timeKeywords = [
+    "today",
+    "tomorrow",
+    "pm",
+    "am",
+    "at ",
+    "on ",
+    "morning",
+    "afternoon",
+    "evening",
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+    "saturday",
+    "sunday",
+  ];
+
   const lowerMessage = message.toLowerCase();
 
   const hasBookingKeyword = bookingKeywords.some((keyword) =>
     lowerMessage.includes(keyword)
   );
 
+  const hasTimeKeyword = timeKeywords.some((keyword) =>
+    lowerMessage.includes(keyword)
+  );
+
   console.log("Message:", message);
   console.log("Has booking keyword:", hasBookingKeyword);
+  console.log("Has time keyword:", hasTimeKeyword);
+
+  // If it's a previous booking conversation and user mentions a time
+  if (
+    hasTimeKeyword &&
+    (lowerMessage.includes("friday") || lowerMessage.includes("morning"))
+  ) {
+    return {
+      isBooking: true,
+      isGeneral: false,
+      continueBooking: true,
+    };
+  }
 
   if (hasBookingKeyword) {
     // Check if it's a general booking request without specific time
-    const hasTimeReference =
-      lowerMessage.includes("today") ||
-      lowerMessage.includes("tomorrow") ||
-      lowerMessage.includes("pm") ||
-      lowerMessage.includes("am") ||
-      lowerMessage.includes("at ") ||
-      lowerMessage.includes("on ");
-
-    if (!hasTimeReference) {
+    if (!hasTimeKeyword) {
       return {
         isBooking: true,
         isGeneral: true,
@@ -162,10 +190,14 @@ async function handleBooking(bookingIntent, originalMessage) {
   try {
     // Handle general booking requests (without specific time)
     if (bookingIntent.isGeneral) {
+      const calendarUrl = process.env.CAL_USERNAME
+        ? `https://cal.com/${process.env.CAL_USERNAME}`
+        : "https://cal.com/darshan-rajashekar";
+
       const replyMessage = `I'd be happy to help you schedule a call with Darshan! 
 
 Here are a few options:
-1. Visit his calendar directly: [Add your Cal.com link here]
+1. Visit his calendar directly: ${calendarUrl}
 2. Let me know a preferred time (e.g., "tomorrow at 3 PM" or "Friday morning")
 
 What works best for you?`;
@@ -180,7 +212,11 @@ What works best for you?`;
 
     // Check if Cal.com API is configured
     if (!process.env.CAL_API_KEY || !process.env.CAL_USERNAME) {
-      const fallbackMessage = `I'd love to help you schedule a call! Please visit Darshan's calendar to book a time that works for you: [Add your Cal.com booking link here]
+      const calendarUrl = process.env.CAL_USERNAME
+        ? `https://cal.com/${process.env.CAL_USERNAME}`
+        : "https://cal.com/darshan-rajashekar";
+
+      const fallbackMessage = `I'd love to help you schedule a call! Please visit Darshan's calendar to book a time that works for you: ${calendarUrl}
 
 You can also reach out directly via email or LinkedIn for scheduling.`;
 
@@ -208,9 +244,15 @@ You can also reach out directly via email or LinkedIn for scheduling.`;
         .map((slot) => new Date(slot.time).toLocaleTimeString())
         .join(", ");
 
-      const unavailableMessage = `Sorry, ${bookingIntent.time} on ${bookingIntent.date} is not available. Here are some available times: ${availableTimesText}
+      const unavailableMessage = `Sorry, ${bookingIntent.time} on ${
+        bookingIntent.date
+      } is not available. Here are some available times: ${availableTimesText}
 
-Or you can view all available slots on his calendar: [Add your Cal.com link]`;
+Or you can view all available slots on his calendar: ${
+        process.env.CAL_USERNAME
+          ? `https://cal.com/${process.env.CAL_USERNAME}`
+          : "https://cal.com/darshan-rajashekar"
+      }`;
 
       return {
         statusCode: 200,
@@ -236,7 +278,11 @@ Or you can view all available slots on his calendar: [Add your Cal.com link]`;
     };
   } catch (error) {
     console.error("Booking error:", error);
-    const errorMessage = `I'd be happy to help you schedule a call! Please visit Darshan's calendar directly to book a time: [Add your Cal.com booking link here]
+    const errorMessage = `I'd be happy to help you schedule a call! Please visit Darshan's calendar directly to book a time: ${
+      process.env.CAL_USERNAME
+        ? `https://cal.com/${process.env.CAL_USERNAME}`
+        : "https://cal.com/darshan-rajashekar"
+    }
 
 Alternatively, you can reach out via email or LinkedIn to schedule.`;
 
