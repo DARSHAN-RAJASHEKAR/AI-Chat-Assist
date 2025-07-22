@@ -159,7 +159,7 @@ async function handleBooking(bookingIntent, originalMessage) {
           reply: `I'd be happy to help you schedule a call with Darshan! 
 
 Here are a few options:
-1. Visit his calendar directly: https://cal.com/darshan-rajashekar/quick-call
+1. Visit his calendar directly: https://cal.com/
 2. Let me know a preferred time (e.g., "tomorrow at 3 PM" or "Friday morning")
 
 What works best for you?`,
