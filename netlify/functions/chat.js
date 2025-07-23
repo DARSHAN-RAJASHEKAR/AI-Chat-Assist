@@ -197,9 +197,25 @@ async function handleBookingFlow(message, state) {
         )}. A confirmation email has been sent to ${email}. Looking forward to speaking with you!`;
         newState = {}; // Reset state
       } else {
-        reply =
-          "I'm sorry, there was an issue booking your call. Please try again or visit my calendar directly.";
-        newState = {}; // Reset state
+        // Provide more specific error message
+        if (booking.error === "API key not configured") {
+          reply =
+            "I'm sorry, the booking system is not properly configured. Please contact the administrator or try booking directly through the calendar link.";
+        } else if (booking.error && booking.error.includes("available")) {
+          reply =
+            "I'm sorry, that time slot is no longer available. Would you like to try booking a different time?";
+          newState.step = "ASK_TIME";
+          newState.bookingFlow = "ASK_TIME";
+        } else {
+          reply = `I'm sorry, there was an issue booking your call: ${
+            booking.error || "Unknown error"
+          }. Please try again or visit the calendar directly.`;
+        }
+
+        // Only reset state if it's a configuration error
+        if (booking.error === "API key not configured") {
+          newState = {};
+        }
       }
       break;
 
@@ -371,16 +387,29 @@ async function getAlternativeSlots(requestedTime) {
 async function createCalcomBooking(dateTime, name, email) {
   const CAL_API_KEY = process.env.CAL_API_KEY;
   const CAL_EVENT_TYPE_ID = process.env.CAL_EVENT_TYPE_ID;
-  const CAL_USERNAME = process.env.CAL_USERNAME;
+
+  if (!CAL_API_KEY) {
+    console.error("CAL_API_KEY is not set in environment variables");
+    return { success: false, error: "API key not configured" };
+  }
+
+  if (!CAL_EVENT_TYPE_ID) {
+    console.error("CAL_EVENT_TYPE_ID is not set in environment variables");
+    return { success: false, error: "Event type not configured" };
+  }
 
   try {
-    // First, try the v2 API
-    const bookingData = {
-      start: dateTime,
-      eventTypeSlug: process.env.CAL_EVENT_SLUG || "30min", // Add event slug to env
-      username: CAL_USERNAME,
-      name: name,
-      email: email,
+    // Format the date properly for Cal.com
+    const startDate = new Date(dateTime);
+
+    // Cal.com v1 API booking endpoint
+    const bookingPayload = {
+      eventTypeId: parseInt(CAL_EVENT_TYPE_ID),
+      start: startDate.toISOString(),
+      responses: {
+        name: name,
+        email: email,
+      },
       timeZone: "Asia/Kolkata",
       language: "en",
       metadata: {
@@ -388,49 +417,80 @@ async function createCalcomBooking(dateTime, name, email) {
       },
     };
 
-    // Try v2 endpoint first
-    let response = await fetch("https://api.cal.com/v2/bookings", {
+    console.log(
+      "Creating booking with payload:",
+      JSON.stringify(bookingPayload, null, 2)
+    );
+    console.log(
+      "Using API Key:",
+      CAL_API_KEY ? `${CAL_API_KEY.substring(0, 10)}...` : "NOT SET"
+    );
+
+    // Try different authentication methods
+    const headers = {
+      "Content-Type": "application/json",
+    };
+
+    // Method 1: Bearer token (most common)
+    headers["Authorization"] = `Bearer ${CAL_API_KEY}`;
+
+    // Also try adding as query parameter
+    const url = `https://api.cal.com/v1/bookings?apiKey=${CAL_API_KEY}`;
+
+    const response = await fetch(url, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${CAL_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(bookingData),
+      headers: headers,
+      body: JSON.stringify(bookingPayload),
     });
 
-    // If v2 fails, try v1
-    if (!response.ok) {
-      console.log("V2 API failed, trying V1...");
+    const responseText = await response.text();
+    console.log("Cal.com response status:", response.status);
+    console.log("Cal.com response:", responseText);
 
-      response = await fetch("https://api.cal.com/v1/bookings", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${CAL_API_KEY}`,
+    if (!response.ok) {
+      // Try alternative method with API key in different format
+      if (response.status === 401) {
+        console.log("Trying alternative authentication method...");
+
+        // Method 2: API key in header
+        const altHeaders = {
           "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          eventTypeId: parseInt(CAL_EVENT_TYPE_ID),
-          start: dateTime,
-          responses: {
-            name: name,
-            email: email,
-          },
-          timeZone: "Asia/Kolkata",
-          language: "en",
-          metadata: {
-            source: "ai-chat-bot",
-          },
-        }),
-      });
+          apiKey: CAL_API_KEY,
+          "x-cal-api-key": CAL_API_KEY,
+        };
+
+        const altResponse = await fetch("https://api.cal.com/v1/bookings", {
+          method: "POST",
+          headers: altHeaders,
+          body: JSON.stringify(bookingPayload),
+        });
+
+        const altResponseText = await altResponse.text();
+        console.log(
+          "Alternative method response:",
+          altResponse.status,
+          altResponseText
+        );
+
+        if (altResponse.ok) {
+          const data = JSON.parse(altResponseText);
+          return { success: true, booking: data };
+        }
+      }
+
+      // Parse error message
+      let errorMessage = "Booking failed";
+      try {
+        const errorData = JSON.parse(responseText);
+        errorMessage = errorData.message || errorData.error || errorMessage;
+      } catch (e) {
+        errorMessage = responseText || errorMessage;
+      }
+
+      return { success: false, error: errorMessage };
     }
 
-    if (!response.ok) {
-      const errorData = await response.text();
-      console.error("Cal.com booking failed:", errorData);
-      return { success: false, error: errorData };
-    }
-
-    const data = await response.json();
+    const data = JSON.parse(responseText);
     return { success: true, booking: data };
   } catch (error) {
     console.error("Error creating booking:", error);
