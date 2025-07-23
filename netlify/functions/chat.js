@@ -5,21 +5,20 @@ exports.handler = async (event, context) => {
   }
 
   try {
-    // Extract the message, context, and the important conversationState object from the request
+    // Extract the message, context, and conversationState from the request
     const {
       message,
       context: userContext,
       conversationState = {},
     } = JSON.parse(event.body);
 
-    // handleConversation will manage the entire logic flow, including state
+    // Handle the conversation flow
     const response = await handleConversation(
       message,
       userContext,
       conversationState
     );
 
-    // Return the response, which includes the reply and the *new* state
     return {
       statusCode: 200,
       body: JSON.stringify(response),
@@ -36,11 +35,7 @@ exports.handler = async (event, context) => {
 };
 
 /**
- * Determines whether to handle the message as part of a booking or as a general query.
- * @param {string} message - The user's message.
- * @param {string} userContext - The predefined context about the person (e.g., resume).
- * @param {object} conversationState - The current state of the conversation.
- * @returns {Promise<object>} An object with the reply and the updated conversation state.
+ * Manages the conversation flow between general queries and booking
  */
 async function handleConversation(message, userContext, conversationState) {
   const lowerMessage = message.toLowerCase();
@@ -50,19 +45,29 @@ async function handleConversation(message, userContext, conversationState) {
     "appointment",
     "call",
     "meeting",
+    "talk",
+    "chat",
+    "connect",
   ];
 
-  // Check if the user is trying to start a new booking conversation
-  const isStartingBooking = bookingKeywords.some((keyword) =>
+  // Check if user wants to book a call
+  const isBookingRequest = bookingKeywords.some((keyword) =>
     lowerMessage.includes(keyword)
   );
 
-  // If we are already in a booking flow OR the user is starting one, use the booking handler
-  if (conversationState.bookingStep || isStartingBooking) {
-    return await handleBooking(message, conversationState);
+  // If in booking flow or starting one
+  if (conversationState.bookingFlow || isBookingRequest) {
+    return await handleBookingFlow(message, conversationState);
   }
 
-  // --- If not a booking, default to a General AI Chat Response ---
+  // Handle general queries
+  return await handleGeneralQuery(message, userContext);
+}
+
+/**
+ * Handles general AI chat responses
+ */
+async function handleGeneralQuery(message, userContext) {
   const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
 
   const prompt = `You are a personal AI assistant for a software engineer. Only answer questions about this person based on the following information. If asked about anything else, politely redirect to questions about their professional background.
@@ -74,135 +79,389 @@ async function handleConversation(message, userContext, conversationState) {
   
   User Question: ${message}`;
 
-  const response = await fetch(geminiUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      contents: [{ parts: [{ text: prompt }] }],
-      generationConfig: { maxOutputTokens: 150 },
-    }),
-  });
+  try {
+    const response = await fetch(geminiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: 150 },
+      }),
+    });
 
-  if (!response.ok) {
-    console.error(`Gemini API Error: ${response.statusText}`);
+    if (!response.ok) {
+      throw new Error(`Gemini API Error: ${response.statusText}`);
+    }
+
+    const data = await response.json();
+    const reply =
+      data.candidates?.[0]?.content?.parts?.[0]?.text ||
+      "I'm sorry, I couldn't generate a response.";
+
+    return {
+      reply: reply,
+      conversationState: {},
+    };
+  } catch (error) {
+    console.error("Error in general query:", error);
     return {
       reply:
-        "Sorry, I'm having trouble connecting to my knowledge base. Please try again.",
+        "Sorry, I'm having trouble processing your request. Please try again.",
       conversationState: {},
     };
   }
-
-  const data = await response.json();
-  const reply =
-    data.candidates?.[0]?.content?.parts?.[0]?.text ||
-    "I'm sorry, I couldn't generate a response.";
-
-  return {
-    reply: reply,
-    conversationState: {}, // Reset the state after any general (non-booking) question
-  };
 }
 
 /**
- * Manages the multi-step booking process using a state machine.
- * @param {string} message - The user's current message.
- * @param {object} state - The current conversation state.
- * @returns {Promise<object>} An object with the reply and the new state.
+ * Handles the booking flow with Cal.com integration
  */
-async function handleBooking(message, state) {
+async function handleBookingFlow(message, state) {
+  let newState = { ...state };
   let reply = "";
-  let newState = { ...state, bookingStep: state.bookingStep || "START" };
 
-  switch (newState.bookingStep) {
-    case "START":
-      newState.bookingStep = "AWAITING_TIME";
+  // Initialize booking flow if not already started
+  if (!newState.bookingFlow) {
+    newState.bookingFlow = "ASK_TIME";
+    newState.step = "ASK_TIME";
+  }
+
+  switch (newState.step) {
+    case "ASK_TIME":
       reply =
-        "I'd be happy to help schedule a call. What time works for you? (e.g., 'tomorrow at 3 PM')";
+        "I'd be happy to help you schedule a call! When would you like to meet? (e.g., 'tomorrow at 3 PM', 'next Monday at 10 AM')";
+      newState.step = "WAITING_FOR_TIME";
       break;
 
-    case "AWAITING_TIME":
-      newState.bookingStep = "AWAITING_DETAILS";
-      newState.time = message; // Store the user's requested time
-      reply = `Great. I'll check for availability for "${message}". Now, what is your full name and email address, separated by a comma? (e.g., "Jane Doe, jane.doe@example.com")`;
+    case "WAITING_FOR_TIME":
+      // Check if user selected from alternatives
+      let selectedDateTime = null;
+
+      // First try to parse as a selection from alternatives
+      if (newState.alternatives) {
+        const lowerMessage = message.toLowerCase();
+        for (let alt of newState.alternatives) {
+          if (
+            lowerMessage.includes(formatDateTime(alt).toLowerCase()) ||
+            message === formatDateTime(alt)
+          ) {
+            selectedDateTime = alt;
+            break;
+          }
+        }
+      }
+
+      // If not found in alternatives, parse as new time
+      if (!selectedDateTime) {
+        selectedDateTime = await parseDateTime(message);
+      }
+
+      if (!selectedDateTime) {
+        reply =
+          "I couldn't understand that time. Could you please specify again? (e.g., 'tomorrow at 2 PM', 'December 25 at 10:30 AM')";
+        break;
+      }
+
+      // For now, skip availability check and proceed directly
+      // This allows booking to work while we debug the Cal.com API
+      newState.selectedTime = selectedDateTime;
+      newState.step = "ASK_DETAILS";
+      reply = `Great! I'll book your call for ${formatDateTime(
+        selectedDateTime
+      )}. To confirm your booking, I'll need your name and email address. Please provide them separated by a comma (e.g., "John Doe, john@example.com")`;
+
+      // Clear alternatives after selection
+      delete newState.alternatives;
       break;
 
-    case "AWAITING_DETAILS":
-      const parts = message.split(",");
-      const name = parts[0]?.trim();
-      const email = parts[1]?.trim();
+    case "ASK_DETAILS":
+      const details = message.split(",").map((s) => s.trim());
+      const name = details[0];
+      const email = details[1];
 
       if (!name || !email || !email.includes("@")) {
-        newState.bookingStep = "AWAITING_DETAILS"; // Stay on this step
         reply =
-          "That doesn't look right. Please provide your full name and a valid email, separated by a comma.";
+          "Please provide both your name and email address separated by a comma (e.g., 'Jane Smith, jane@email.com')";
+        break;
+      }
+
+      // Create booking with Cal.com
+      const booking = await createCalcomBooking(
+        newState.selectedTime,
+        name,
+        email
+      );
+
+      if (booking.success) {
+        reply = `Perfect! Your call has been booked for ${formatDateTime(
+          newState.selectedTime
+        )}. A confirmation email has been sent to ${email}. Looking forward to speaking with you!`;
+        newState = {}; // Reset state
       } else {
-        newState.name = name;
-        newState.email = email;
-
-        // --- THIS BLOCK IS NOW ACTIVE ---
-        try {
-          // 1. Convert the natural language time to a machine-readable format
-          const startDateTime = await parseDateTimeForAPI(newState.time);
-
-          if (!startDateTime) {
-            throw new Error("Could not determine a valid date and time.");
-          }
-
-          // 2. Call the real Cal.com API to create the booking
-          const booking = await createBooking(
-            startDateTime,
-            newState.name,
-            newState.email
-          );
-
-          if (booking && booking.id) {
-            reply = `Thank you, ${name}! Your call for "${newState.time}" is confirmed. A confirmation has been sent to ${email}.`;
-            newState = {}; // Reset state after successful booking
-          } else {
-            reply =
-              "I'm sorry, I couldn't book that time. It might not be available. Please try another time.";
-            newState.bookingStep = "AWAITING_TIME"; // Go back to asking for a time
-          }
-        } catch (error) {
-          console.error("Booking process error:", error);
-          reply =
-            "I encountered an error while trying to book your call. Please try again later or visit the calendar directly.";
-          newState = {}; // Reset on error
-        }
+        reply =
+          "I'm sorry, there was an issue booking your call. Please try again or visit my calendar directly.";
+        newState = {}; // Reset state
       }
       break;
 
     default:
-      reply = "Sorry, something went wrong. Would you like to start over?";
-      newState = {}; // Reset on error
-      break;
+      reply =
+        "Something went wrong. Would you like to start over with booking a call?";
+      newState = {};
   }
 
   return { reply, conversationState: newState };
 }
 
 /**
- * Uses AI to parse a natural language string into an ISO 8601 datetime format.
- * @param {string} timeStr - The natural language time (e.g., "tomorrow at 3pm").
- * @returns {Promise<string|null>} - An ISO 8601 string (e.g., "2025-07-24T15:00:00.000Z") or null.
+ * Parse natural language datetime using Gemini
  */
-async function parseDateTimeForAPI(timeStr) {
+async function parseDateTime(timeStr) {
   const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
   const currentDate = new Date().toISOString();
 
-  const prompt = `Given the current date is ${currentDate}, convert the following user request into a strict ISO 8601 format (YYYY-MM-DDTHH:mm:ss.sssZ). Assume the timezone is India Standard Time (IST, UTC+5:30).
+  const prompt = `Current date/time: ${currentDate}
+  User timezone: India Standard Time (IST, UTC+5:30)
+  
+  Convert this request to ISO 8601 format: "${timeStr}"
+  
+  Return ONLY the ISO string, nothing else.`;
 
-    User request: "${timeStr}"
-    
-    Return ONLY the ISO 8601 string.`;
+  try {
+    const response = await fetch(geminiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        contents: [{ parts: [{ text: prompt }] }],
+        generationConfig: { maxOutputTokens: 50 },
+      }),
+    });
 
-  const response = await fetch(geminiUrl, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
-  });
+    if (!response.ok) return null;
 
-  if (!response.ok) return null;
-  const data = await response.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
+    const data = await response.json();
+    const dateStr = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+
+    // Validate the date
+    const date = new Date(dateStr);
+    return isNaN(date.getTime()) ? null : dateStr;
+  } catch (error) {
+    console.error("Error parsing datetime:", error);
+    return null;
+  }
+}
+
+/**
+ * Check availability with Cal.com API
+ */
+async function checkCalcomAvailability(dateTime) {
+  const CAL_API_KEY = process.env.CAL_API_KEY;
+  const CAL_USERNAME = process.env.CAL_USERNAME; // Add username to env vars
+
+  try {
+    // Parse the date properly
+    const requestedDate = new Date(dateTime);
+    const dateStr = requestedDate.toISOString().split("T")[0]; // YYYY-MM-DD format
+
+    // Cal.com v2 API endpoint for availability
+    const response = await fetch(
+      `https://api.cal.com/v2/slots/available?startTime=${dateStr}&endTime=${dateStr}&username=${CAL_USERNAME}`,
+      {
+        headers: {
+          Authorization: `Bearer ${CAL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      console.error("Cal.com availability check failed:", response.statusText);
+      // If API fails, assume available to allow booking attempt
+      return { isAvailable: true };
+    }
+
+    const data = await response.json();
+
+    // Check if any slot matches the requested time
+    const requestedHour = requestedDate.getHours();
+    const requestedMinute = requestedDate.getMinutes();
+
+    const isAvailable =
+      data.data?.some((slot) => {
+        const slotDate = new Date(slot.startTime);
+        return (
+          slotDate.getHours() === requestedHour &&
+          slotDate.getMinutes() === requestedMinute
+        );
+      }) || false;
+
+    // If no slots data, assume available
+    if (!data.data || data.data.length === 0) {
+      return { isAvailable: true };
+    }
+
+    return { isAvailable };
+  } catch (error) {
+    console.error("Error checking availability:", error);
+    // Default to available if API fails to allow booking attempt
+    return { isAvailable: true };
+  }
+}
+
+/**
+ * Get alternative time slots near the requested time
+ */
+async function getAlternativeSlots(requestedTime) {
+  const CAL_API_KEY = process.env.CAL_API_KEY;
+  const CAL_EVENT_TYPE_ID = process.env.CAL_EVENT_TYPE_ID;
+
+  try {
+    const startDate = new Date(requestedTime);
+    startDate.setHours(0, 0, 0, 0);
+
+    const endDate = new Date(startDate);
+    endDate.setDate(endDate.getDate() + 7); // Check next 7 days
+
+    const response = await fetch(
+      `https://api.cal.com/v1/availability?eventTypeId=${CAL_EVENT_TYPE_ID}&startTime=${startDate.toISOString()}&endTime=${endDate.toISOString()}`,
+      {
+        headers: {
+          Authorization: `Bearer ${CAL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to fetch availability");
+    }
+
+    const data = await response.json();
+
+    // Get up to 5 slots nearest to requested time
+    const slots = data.slots || [];
+    const requestedTimeMs = new Date(requestedTime).getTime();
+
+    return slots
+      .map((slot) => ({
+        time: slot.time,
+        diff: Math.abs(new Date(slot.time).getTime() - requestedTimeMs),
+      }))
+      .sort((a, b) => a.diff - b.diff)
+      .slice(0, 5)
+      .map((slot) => slot.time);
+  } catch (error) {
+    console.error("Error getting alternatives:", error);
+    // Return some default slots if API fails
+    const alternatives = [];
+    const baseTime = new Date(requestedTime);
+
+    for (let i = 1; i <= 3; i++) {
+      const altTime = new Date(baseTime);
+      altTime.setDate(altTime.getDate() + i);
+      alternatives.push(altTime.toISOString());
+    }
+
+    return alternatives;
+  }
+}
+
+/**
+ * Create a booking with Cal.com
+ */
+async function createCalcomBooking(dateTime, name, email) {
+  const CAL_API_KEY = process.env.CAL_API_KEY;
+  const CAL_EVENT_TYPE_ID = process.env.CAL_EVENT_TYPE_ID;
+  const CAL_USERNAME = process.env.CAL_USERNAME;
+
+  try {
+    // First, try the v2 API
+    const bookingData = {
+      start: dateTime,
+      eventTypeSlug: process.env.CAL_EVENT_SLUG || "30min", // Add event slug to env
+      username: CAL_USERNAME,
+      name: name,
+      email: email,
+      timeZone: "Asia/Kolkata",
+      language: "en",
+      metadata: {
+        source: "ai-chat-bot",
+      },
+    };
+
+    // Try v2 endpoint first
+    let response = await fetch("https://api.cal.com/v2/bookings", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${CAL_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(bookingData),
+    });
+
+    // If v2 fails, try v1
+    if (!response.ok) {
+      console.log("V2 API failed, trying V1...");
+
+      response = await fetch("https://api.cal.com/v1/bookings", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${CAL_API_KEY}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          eventTypeId: parseInt(CAL_EVENT_TYPE_ID),
+          start: dateTime,
+          responses: {
+            name: name,
+            email: email,
+          },
+          timeZone: "Asia/Kolkata",
+          language: "en",
+          metadata: {
+            source: "ai-chat-bot",
+          },
+        }),
+      });
+    }
+
+    if (!response.ok) {
+      const errorData = await response.text();
+      console.error("Cal.com booking failed:", errorData);
+      return { success: false, error: errorData };
+    }
+
+    const data = await response.json();
+    return { success: true, booking: data };
+  } catch (error) {
+    console.error("Error creating booking:", error);
+    return { success: false, error: error.message };
+  }
+}
+
+/**
+ * Format datetime for display
+ */
+function formatDateTime(dateTimeStr) {
+  const date = new Date(dateTimeStr);
+  const options = {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "numeric",
+    minute: "numeric",
+    hour12: true,
+    timeZone: "Asia/Kolkata",
+  };
+
+  return date.toLocaleString("en-US", options);
+}
+
+/**
+ * Format alternative slots for display
+ */
+function formatAlternatives(alternatives) {
+  return alternatives
+    .map((alt, index) => `${index + 1}. ${formatDateTime(alt)}`)
+    .join("\n");
 }
