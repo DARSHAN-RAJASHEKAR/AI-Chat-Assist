@@ -111,59 +111,98 @@ async function handleConversation(message, userContext, conversationState) {
  */
 async function handleBooking(message, state) {
   let reply = "";
-  // Initialize or copy the existing state. The first step is "START".
   let newState = { ...state, bookingStep: state.bookingStep || "START" };
 
   switch (newState.bookingStep) {
-    // STATE 1: Starting the booking process
     case "START":
       newState.bookingStep = "AWAITING_TIME";
       reply =
         "I'd be happy to help schedule a call. What time works for you? (e.g., 'tomorrow at 3 PM')";
       break;
 
-    // STATE 2: User has provided a time, now ask for details
     case "AWAITING_TIME":
       newState.bookingStep = "AWAITING_DETAILS";
-      newState.time = message; // Save the user's requested time into the state
+      newState.time = message; // Store the user's requested time
       reply = `Great. I'll check for availability for "${message}". Now, what is your full name and email address, separated by a comma? (e.g., "Jane Doe, jane.doe@example.com")`;
       break;
 
-    // STATE 3: User has provided details, now validate and confirm
     case "AWAITING_DETAILS":
       const parts = message.split(",");
       const name = parts[0]?.trim();
       const email = parts[1]?.trim();
 
-      // Basic validation for name and email format
       if (!name || !email || !email.includes("@")) {
-        // If invalid, stay on this step and ask again
-        newState.bookingStep = "AWAITING_DETAILS";
+        newState.bookingStep = "AWAITING_DETAILS"; // Stay on this step
         reply =
           "That doesn't look right. Please provide your full name and a valid email, separated by a comma.";
       } else {
-        // If valid, save the details and confirm the booking
         newState.name = name;
         newState.email = email;
 
-        // --- Final Booking Step ---
-        // Here you would call the real Cal.com API.
-        // For now, we simulate a successful confirmation.
-        reply = `Thank you, ${name}! Your call for "${newState.time}" is confirmed. A confirmation will be sent to ${email}.`;
+        // --- THIS BLOCK IS NOW ACTIVE ---
+        try {
+          // 1. Convert the natural language time to a machine-readable format
+          const startDateTime = await parseDateTimeForAPI(newState.time);
 
-        // Booking is complete, so we reset the state for the next conversation.
-        newState = {};
+          if (!startDateTime) {
+            throw new Error("Could not determine a valid date and time.");
+          }
+
+          // 2. Call the real Cal.com API to create the booking
+          const booking = await createBooking(
+            startDateTime,
+            newState.name,
+            newState.email
+          );
+
+          if (booking && booking.id) {
+            reply = `Thank you, ${name}! Your call for "${newState.time}" is confirmed. A confirmation has been sent to ${email}.`;
+            newState = {}; // Reset state after successful booking
+          } else {
+            reply =
+              "I'm sorry, I couldn't book that time. It might not be available. Please try another time.";
+            newState.bookingStep = "AWAITING_TIME"; // Go back to asking for a time
+          }
+        } catch (error) {
+          console.error("Booking process error:", error);
+          reply =
+            "I encountered an error while trying to book your call. Please try again later or visit the calendar directly.";
+          newState = {}; // Reset on error
+        }
       }
       break;
 
-    // Default case for any unexpected errors
     default:
-      reply =
-        "Sorry, something went wrong with the booking process. Would you like to start over?";
+      reply = "Sorry, something went wrong. Would you like to start over?";
       newState = {}; // Reset on error
       break;
   }
 
-  // Return the reply and the new state to the client
   return { reply, conversationState: newState };
+}
+
+/**
+ * Uses AI to parse a natural language string into an ISO 8601 datetime format.
+ * @param {string} timeStr - The natural language time (e.g., "tomorrow at 3pm").
+ * @returns {Promise<string|null>} - An ISO 8601 string (e.g., "2025-07-24T15:00:00.000Z") or null.
+ */
+async function parseDateTimeForAPI(timeStr) {
+  const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
+  const currentDate = new Date().toISOString();
+
+  const prompt = `Given the current date is ${currentDate}, convert the following user request into a strict ISO 8601 format (YYYY-MM-DDTHH:mm:ss.sssZ). Assume the timezone is India Standard Time (IST, UTC+5:30).
+
+    User request: "${timeStr}"
+    
+    Return ONLY the ISO 8601 string.`;
+
+  const response = await fetch(geminiUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] }),
+  });
+
+  if (!response.ok) return null;
+  const data = await response.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || null;
 }
