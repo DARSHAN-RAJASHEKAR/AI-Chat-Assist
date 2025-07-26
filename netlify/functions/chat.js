@@ -128,7 +128,7 @@ async function handleBookingFlow(message, state) {
   switch (newState.step) {
     case "ASK_TIME":
       reply =
-        "I'd be happy to help you schedule a call! When would you like to meet? (e.g., 'tomorrow at 3 PM', 'next Monday at 10 AM')";
+        "I'd be happy to help you schedule a call! Please note that calls need to be booked at least 24 hours in advance. When would you like to meet? (e.g., 'day after tomorrow at 3 PM', 'next Monday at 10 AM')";
       newState.step = "WAITING_FOR_TIME";
       break;
 
@@ -157,20 +157,56 @@ async function handleBookingFlow(message, state) {
 
       if (!selectedDateTime) {
         reply =
-          "I couldn't understand that time. Could you please specify again? (e.g., 'tomorrow at 2 PM', 'December 25 at 10:30 AM')";
+          "I couldn't understand that time. Could you please specify again? (e.g., 'day after tomorrow at 2 PM', 'December 25 at 10:30 AM')";
         break;
       }
 
-      // For now, skip availability check and proceed directly
-      // This allows booking to work while we debug the Cal.com API
-      newState.selectedTime = selectedDateTime;
-      newState.step = "ASK_DETAILS";
-      reply = `Great! I'll book your call for ${formatDateTime(
-        selectedDateTime
-      )}. To confirm your booking, I'll need your name and email address. Please provide them separated by a comma (e.g., "John Doe, john@example.com")`;
+      // Check if the time is at least 24 hours in the future
+      const now = new Date();
+      const selectedDate = new Date(selectedDateTime);
+      const hoursUntilMeeting = (selectedDate - now) / (1000 * 60 * 60);
 
-      // Clear alternatives after selection
-      delete newState.alternatives;
+      if (hoursUntilMeeting < 24) {
+        reply = `I'm sorry, but calls need to be booked at least 24 hours in advance. The earliest you can book is ${formatDateTime(
+          new Date(now.getTime() + 24 * 60 * 60 * 1000)
+        )}. Please choose a time after that.`;
+        break;
+      }
+
+      // Check availability with Cal.com
+      const availability = await checkCalcomAvailability(selectedDateTime);
+
+      if (availability.isAvailable) {
+        newState.selectedTime = selectedDateTime;
+        newState.step = "ASK_DETAILS";
+        reply = `Perfect! ${formatDateTime(
+          selectedDateTime
+        )} is available. To confirm your booking, I'll need your name and email address.`;
+      } else {
+        // Get alternative slots
+        const alternatives = await getAlternativeSlots(selectedDateTime);
+        newState.alternatives = alternatives;
+
+        if (alternatives.length > 0) {
+          reply = `I'm sorry, ${formatDateTime(
+            selectedDateTime
+          )} is not available. Here are some nearby available slots:\n\n${formatAlternatives(
+            alternatives
+          )}\n\nPlease choose one of these times or suggest another time.`;
+        } else {
+          reply = `I'm sorry, ${formatDateTime(
+            selectedDateTime
+          )} is not available, and I couldn't find nearby alternatives. Please try a different date or time (remember, it must be at least 24 hours from now).`;
+        }
+        newState.step = "WAITING_FOR_TIME";
+      }
+
+      // Clear alternatives after processing
+      if (!availability.isAvailable) {
+        newState.alternatives = alternatives;
+      } else {
+        delete newState.alternatives;
+      }
       break;
 
     case "ASK_DETAILS":
@@ -180,7 +216,8 @@ async function handleBookingFlow(message, state) {
 
       if (!name || !email || !email.includes("@")) {
         reply =
-          "Please provide both your name and email address separated by a comma (e.g., 'Jane Smith, jane@email.com')";
+          "Please make sure to fill in both your name and a valid email address in the form above.";
+        // Don't change the step, keep it as ASK_DETAILS so form stays visible
         break;
       }
 
@@ -201,6 +238,14 @@ async function handleBookingFlow(message, state) {
         if (booking.error === "API key not configured") {
           reply =
             "I'm sorry, the booking system is not properly configured. Please contact the administrator or try booking directly through the calendar link.";
+        } else if (
+          booking.error &&
+          booking.error.includes("booking_time_out_of_bounds_error")
+        ) {
+          reply =
+            "I'm sorry, that time slot cannot be booked as it doesn't meet the 24-hour advance notice requirement. Please choose a time at least 24 hours from now.";
+          newState.step = "ASK_TIME";
+          newState.bookingFlow = "ASK_TIME";
         } else if (booking.error && booking.error.includes("available")) {
           reply =
             "I'm sorry, that time slot is no longer available. Would you like to try booking a different time?";
@@ -232,15 +277,22 @@ async function handleBookingFlow(message, state) {
  * Parse natural language datetime using Gemini
  */
 async function parseDateTime(timeStr) {
+  // REVERTED to a known stable model for maximum reliability.
   const geminiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`;
   const currentDate = new Date().toISOString();
 
-  const prompt = `Current date/time: ${currentDate}
-  User timezone: India Standard Time (IST, UTC+5:30)
-  
-  Convert this request to ISO 8601 format: "${timeStr}"
-  
-  Return ONLY the ISO string, nothing else.`;
+  // The robust prompt with a generic example to avoid confusion.
+  const prompt = `You are an expert date-time parser. Your task is to convert a user's natural language request into a precise ISO 8601 timestamp.
+- The current date and time is: ${currentDate}. The user is in 'Asia/Kolkata' (IST).
+- You MUST return ONLY the valid ISO 8601 string and nothing else.
+
+Example:
+User request: "next Tuesday at 4pm"
+ISO 8601 Output: "2024-05-28T16:00:00.000Z"
+
+Now, parse the following request based on the current date provided above:
+User request: "${timeStr}"
+ISO 8601 Output:`;
 
   try {
     const response = await fetch(geminiUrl, {
@@ -252,12 +304,33 @@ async function parseDateTime(timeStr) {
       }),
     });
 
-    if (!response.ok) return null;
+    if (!response.ok) {
+      console.error(
+        "Gemini API Error:",
+        response.status,
+        await response.text()
+      );
+      return null;
+    }
 
     const data = await response.json();
-    const dateStr = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
+    const modelOutput = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim();
 
-    // Validate the date
+    if (!modelOutput) return null;
+
+    // NEW: Use a regular expression to extract the ISO string. This is much more robust.
+    const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z?/;
+    const match = modelOutput.match(isoRegex);
+    const dateStr = match ? match[0] : null;
+
+    if (!dateStr) {
+      console.error(
+        "Could not extract ISO string from model output:",
+        modelOutput
+      );
+      return null;
+    }
+
     const date = new Date(dateStr);
     return isNaN(date.getTime()) ? null : dateStr;
   } catch (error) {
@@ -271,55 +344,62 @@ async function parseDateTime(timeStr) {
  */
 async function checkCalcomAvailability(dateTime) {
   const CAL_API_KEY = process.env.CAL_API_KEY;
-  const CAL_USERNAME = process.env.CAL_USERNAME; // Add username to env vars
+  const CAL_EVENT_TYPE_ID = process.env.CAL_EVENT_TYPE_ID;
+
+  if (!CAL_API_KEY || !CAL_EVENT_TYPE_ID) {
+    console.error("Missing Cal.com credentials for availability check");
+    return { isAvailable: true }; // Default to available if not configured
+  }
 
   try {
-    // Parse the date properly
-    const requestedDate = new Date(dateTime);
-    const dateStr = requestedDate.toISOString().split("T")[0]; // YYYY-MM-DD format
+    const startDate = new Date(dateTime);
+    const endDate = new Date(startDate.getTime() + 30 * 60000); // 30 minutes later
 
-    // Cal.com v2 API endpoint for availability
-    const response = await fetch(
-      `https://api.cal.com/v2/slots/available?startTime=${dateStr}&endTime=${dateStr}&username=${CAL_USERNAME}`,
-      {
-        headers: {
-          Authorization: `Bearer ${CAL_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+    // Format dates for Cal.com API
+    const startTime = startDate.toISOString();
+    const endTime = endDate.toISOString();
+
+    // Cal.com v1 availability endpoint
+    const url = `https://api.cal.com/v1/availability?apiKey=${CAL_API_KEY}&eventTypeId=${CAL_EVENT_TYPE_ID}&startTime=${startTime}&endTime=${endTime}&timeZone=Asia/Kolkata`;
+
+    console.log("Checking availability for:", startTime);
+
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
 
     if (!response.ok) {
-      console.error("Cal.com availability check failed:", response.statusText);
-      // If API fails, assume available to allow booking attempt
-      return { isAvailable: true };
+      console.error(
+        "Availability check failed:",
+        response.status,
+        await response.text()
+      );
+      return { isAvailable: true }; // Default to available on error
     }
 
     const data = await response.json();
+    console.log("Availability response:", JSON.stringify(data, null, 2));
 
-    // Check if any slot matches the requested time
-    const requestedHour = requestedDate.getHours();
-    const requestedMinute = requestedDate.getMinutes();
+    // Check if the requested time slot exists in the busy array
+    // If it's in the busy array, it's not available
+    if (data.busy && Array.isArray(data.busy)) {
+      const requestedTime = startDate.getTime();
+      const isbusy = data.busy.some((busySlot) => {
+        const busyStart = new Date(busySlot.start).getTime();
+        const busyEnd = new Date(busySlot.end).getTime();
+        return requestedTime >= busyStart && requestedTime < busyEnd;
+      });
 
-    const isAvailable =
-      data.data?.some((slot) => {
-        const slotDate = new Date(slot.startTime);
-        return (
-          slotDate.getHours() === requestedHour &&
-          slotDate.getMinutes() === requestedMinute
-        );
-      }) || false;
-
-    // If no slots data, assume available
-    if (!data.data || data.data.length === 0) {
-      return { isAvailable: true };
+      return { isAvailable: !isbusy };
     }
 
-    return { isAvailable };
+    // If no busy data, assume available
+    return { isAvailable: true };
   } catch (error) {
     console.error("Error checking availability:", error);
-    // Default to available if API fails to allow booking attempt
-    return { isAvailable: true };
+    return { isAvailable: true }; // Default to available on error
   }
 }
 
@@ -330,34 +410,51 @@ async function getAlternativeSlots(requestedTime) {
   const CAL_API_KEY = process.env.CAL_API_KEY;
   const CAL_EVENT_TYPE_ID = process.env.CAL_EVENT_TYPE_ID;
 
+  if (!CAL_API_KEY || !CAL_EVENT_TYPE_ID) {
+    return [];
+  }
+
   try {
-    const startDate = new Date(requestedTime);
+    const requestedDate = new Date(requestedTime);
+    const startDate = new Date(requestedDate);
+
+    // Look for slots within the next 7 days from the requested date
     startDate.setHours(0, 0, 0, 0);
-
     const endDate = new Date(startDate);
-    endDate.setDate(endDate.getDate() + 7); // Check next 7 days
+    endDate.setDate(endDate.getDate() + 7);
 
-    const response = await fetch(
-      `https://api.cal.com/v1/availability?eventTypeId=${CAL_EVENT_TYPE_ID}&startTime=${startDate.toISOString()}&endTime=${endDate.toISOString()}`,
-      {
-        headers: {
-          Authorization: `Bearer ${CAL_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-      }
-    );
+    // Cal.com v1 slots endpoint
+    const url = `https://api.cal.com/v1/slots?apiKey=${CAL_API_KEY}&eventTypeId=${CAL_EVENT_TYPE_ID}&startTime=${startDate.toISOString()}&endTime=${endDate.toISOString()}&timeZone=Asia/Kolkata`;
+
+    console.log("Getting alternative slots...");
+
+    const response = await fetch(url, {
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
 
     if (!response.ok) {
-      throw new Error("Failed to fetch availability");
+      console.error("Failed to get slots:", response.status);
+      return [];
     }
 
     const data = await response.json();
+    console.log("Slots response:", data);
 
-    // Get up to 5 slots nearest to requested time
-    const slots = data.slots || [];
-    const requestedTimeMs = new Date(requestedTime).getTime();
+    if (!data.slots || !Array.isArray(data.slots)) {
+      return [];
+    }
 
-    return slots
+    // Filter slots that are at least 24 hours from now
+    const now = new Date();
+    const minTime = now.getTime() + 24 * 60 * 60 * 1000;
+
+    // Sort slots by proximity to requested time
+    const requestedTimeMs = requestedDate.getTime();
+
+    const validSlots = data.slots
+      .filter((slot) => new Date(slot.time).getTime() >= minTime)
       .map((slot) => ({
         time: slot.time,
         diff: Math.abs(new Date(slot.time).getTime() - requestedTimeMs),
@@ -365,19 +462,11 @@ async function getAlternativeSlots(requestedTime) {
       .sort((a, b) => a.diff - b.diff)
       .slice(0, 5)
       .map((slot) => slot.time);
+
+    return validSlots;
   } catch (error) {
     console.error("Error getting alternatives:", error);
-    // Return some default slots if API fails
-    const alternatives = [];
-    const baseTime = new Date(requestedTime);
-
-    for (let i = 1; i <= 3; i++) {
-      const altTime = new Date(baseTime);
-      altTime.setDate(altTime.getDate() + i);
-      alternatives.push(altTime.toISOString());
-    }
-
-    return alternatives;
+    return [];
   }
 }
 

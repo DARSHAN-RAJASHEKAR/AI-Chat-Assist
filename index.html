@@ -81,6 +81,94 @@
         border-bottom-left-radius: 4px;
       }
 
+      .form-message {
+        background: #f8f9fa;
+        border: 2px solid #e9ecef;
+        color: #333;
+        align-self: flex-start;
+        border-bottom-left-radius: 4px;
+        max-width: 95%;
+        padding: 20px;
+      }
+
+      .form-container {
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+      }
+
+      .form-group {
+        display: flex;
+        flex-direction: column;
+        gap: 5px;
+      }
+
+      .form-group label {
+        font-weight: 600;
+        color: #495057;
+        font-size: 14px;
+      }
+
+      .form-group input {
+        padding: 12px 16px;
+        border: 2px solid #e9ecef;
+        border-radius: 12px;
+        font-size: 16px;
+        outline: none;
+        transition: all 0.3s ease;
+      }
+
+      .form-group input:focus {
+        border-color: #667eea;
+        box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+      }
+
+      .form-group input:invalid {
+        border-color: #dc3545;
+      }
+
+      .form-buttons {
+        display: flex;
+        gap: 10px;
+        margin-top: 10px;
+      }
+
+      .form-button {
+        flex: 1;
+        padding: 12px 20px;
+        border: none;
+        border-radius: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: all 0.3s ease;
+        font-size: 14px;
+      }
+
+      .form-button.primary {
+        background: #667eea;
+        color: white;
+      }
+
+      .form-button.primary:hover {
+        background: #5a6fd8;
+        transform: translateY(-1px);
+      }
+
+      .form-button.secondary {
+        background: #6c757d;
+        color: white;
+      }
+
+      .form-button.secondary:hover {
+        background: #5a6268;
+      }
+
+      .form-button:disabled {
+        background: #ccc;
+        cursor: not-allowed;
+        transform: none;
+      }
+
       .typing {
         display: flex;
         gap: 4px;
@@ -160,6 +248,13 @@
         font-style: italic;
         margin: 20px 0;
       }
+
+      .error-message {
+        color: #dc3545;
+        font-size: 12px;
+        margin-top: 5px;
+        display: none;
+      }
     </style>
   </head>
   <body>
@@ -191,7 +286,7 @@
       const messageInput = document.getElementById("messageInput");
       const sendButton = document.getElementById("sendButton");
 
-      // **NEW:** Variable to hold the state of the conversation.
+      // Variable to hold the state of the conversation
       let conversationState = {};
 
       const personalInfo = `
@@ -258,7 +353,6 @@
             body: JSON.stringify({
               message: message,
               context: personalInfo,
-              // **NEW:** Send the current state to the backend.
               conversationState: conversationState,
             }),
           });
@@ -267,8 +361,15 @@
           typingDiv.remove();
 
           if (data.reply) {
-            addMessage(data.reply, "bot");
-            // **NEW:** Update the local state with the state from the backend.
+            // Check if we need to show the form
+            if (
+              data.conversationState &&
+              data.conversationState.step === "ASK_DETAILS"
+            ) {
+              addFormMessage(data.reply);
+            } else {
+              addMessage(data.reply, "bot");
+            }
             conversationState = data.conversationState || {};
           } else {
             addMessage(
@@ -291,6 +392,161 @@
         messageDiv.textContent = text;
         chatMessages.appendChild(messageDiv);
         scrollToBottom();
+      }
+
+      function addFormMessage(text) {
+        const formDiv = document.createElement("div");
+        formDiv.className = "message form-message";
+
+        formDiv.innerHTML = `
+          <div class="form-container">
+            <p style="margin-bottom: 15px; font-weight: 600;">${text.replace(
+              'To confirm your booking, I\'ll need your name and email address. Please provide them separated by a comma (e.g., "John Doe, john@example.com")',
+              "To confirm your booking, please fill in your details below:"
+            )}</p>
+            
+            <div class="form-group">
+              <label for="userName">Full Name *</label>
+              <input 
+                type="text" 
+                id="userName" 
+                name="userName" 
+                required 
+                placeholder="Enter your full name"
+              />
+              <div class="error-message" id="nameError">Please enter your full name</div>
+            </div>
+            
+            <div class="form-group">
+              <label for="userEmail">Email Address *</label>
+              <input 
+                type="email" 
+                id="userEmail" 
+                name="userEmail" 
+                required 
+                placeholder="Enter your email address"
+              />
+              <div class="error-message" id="emailError">Please enter a valid email address</div>
+            </div>
+            
+            <div class="form-buttons">
+              <button type="button" class="form-button secondary" onclick="cancelBooking()">Cancel</button>
+              <button type="button" class="form-button primary" onclick="submitBookingForm()">Confirm Booking</button>
+            </div>
+          </div>
+        `;
+
+        chatMessages.appendChild(formDiv);
+        scrollToBottom();
+
+        // Focus on the first input
+        setTimeout(() => {
+          document.getElementById("userName").focus();
+        }, 100);
+      }
+
+      window.submitBookingForm = async function () {
+        const nameInput = document.getElementById("userName");
+        const emailInput = document.getElementById("userEmail");
+        const nameError = document.getElementById("nameError");
+        const emailError = document.getElementById("emailError");
+
+        // Reset error states
+        nameError.style.display = "none";
+        emailError.style.display = "none";
+        nameInput.style.borderColor = "#e9ecef";
+        emailInput.style.borderColor = "#e9ecef";
+
+        const name = nameInput.value.trim();
+        const email = emailInput.value.trim();
+
+        let hasError = false;
+
+        // Validate name
+        if (!name) {
+          nameError.textContent = "Please enter your full name";
+          nameError.style.display = "block";
+          nameInput.style.borderColor = "#dc3545";
+          hasError = true;
+        }
+
+        // Validate email
+        if (!email) {
+          emailError.textContent = "Please enter your email address";
+          emailError.style.display = "block";
+          emailInput.style.borderColor = "#dc3545";
+          hasError = true;
+        } else if (!isValidEmail(email)) {
+          emailError.textContent = "Please enter a valid email address";
+          emailError.style.display = "block";
+          emailInput.style.borderColor = "#dc3545";
+          hasError = true;
+        }
+
+        if (hasError) {
+          return;
+        }
+
+        // Disable form while processing
+        const submitBtn = document.querySelector(".form-button.primary");
+        const cancelBtn = document.querySelector(".form-button.secondary");
+        submitBtn.disabled = true;
+        cancelBtn.disabled = true;
+        submitBtn.textContent = "Processing...";
+
+        // Show typing indicator
+        const typingDiv = document.createElement("div");
+        typingDiv.className = "message bot-message typing";
+        typingDiv.innerHTML = "<span></span><span></span><span></span>";
+        chatMessages.appendChild(typingDiv);
+        scrollToBottom();
+
+        try {
+          // Send the form data as a formatted message
+          const formattedMessage = `${name}, ${email}`;
+
+          const response = await fetch("/.netlify/functions/chat", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              message: formattedMessage,
+              context: personalInfo,
+              conversationState: conversationState,
+            }),
+          });
+
+          const data = await response.json();
+          typingDiv.remove();
+
+          if (data.reply) {
+            addMessage(data.reply, "bot");
+            conversationState = data.conversationState || {};
+          } else {
+            addMessage(
+              "Sorry, I encountered an error. Please try again.",
+              "bot"
+            );
+          }
+        } catch (error) {
+          typingDiv.remove();
+          addMessage("Sorry, I encountered an error. Please try again.", "bot");
+        }
+      };
+
+      window.cancelBooking = function () {
+        // Reset conversation state
+        conversationState = {};
+        addMessage(
+          "Booking cancelled. Feel free to ask me anything else!",
+          "bot"
+        );
+      };
+
+      function isValidEmail(email) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        return emailRegex.test(email);
       }
 
       function scrollToBottom() {
